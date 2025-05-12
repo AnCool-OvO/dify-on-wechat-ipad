@@ -1267,41 +1267,35 @@ class WX849Channel(ChatChannel):
                 sender_extracted = True
                 logger.debug(f"[WX849] 群聊发送者提取(方法1): {cmsg.sender_wxid}")
             
-            # 方法2: 尝试解析简单的格式 "wxid:消息内容"
+            # 方法3: 尝试从MsgSource XML中提取
             if not sender_extracted:
-                split_content = cmsg.content.split(":", 1)
-                if len(split_content) > 1 and split_content[0] and not split_content[0].startswith("<"):
-                    cmsg.sender_wxid = split_content[0]
-                    cmsg.content = split_content[1]
-                    sender_extracted = True
-                    logger.debug(f"[WX849] 群聊发送者提取(方法2): {cmsg.sender_wxid}")
-            
-            # 方法3: 尝试从回复XML中提取
-            if not sender_extracted and cmsg.content and cmsg.content.startswith("<"):
                 try:
-                    # 解析XML内容
-                    root = ET.fromstring(cmsg.content)
-                    
-                    # 查找不同类型的XML中可能存在的发送者信息
-                    if root.tag == "msg":
-                        # 常见的XML消息格式
-                        sender_node = root.find(".//username")
-                        if sender_node is not None and sender_node.text:
-                            cmsg.sender_wxid = sender_node.text
-                            sender_extracted = True
-                            logger.debug(f"[WX849] 群聊发送者从XML提取: {cmsg.sender_wxid}")
-                        
-                        # 尝试其他可能的标签
-                        if not sender_extracted:
-                            for tag in ["fromusername", "sender", "from"]:
-                                sender_node = root.find(f".//{tag}")
-                                if sender_node is not None and sender_node.text:
-                                    cmsg.sender_wxid = sender_node.text
+                    msg_source = cmsg.msg.get("MsgSource", "")
+                    if msg_source and (msg_source.startswith("<") or "<msgsource>" in msg_source.lower()):
+                        try:
+                            if "<msgsource>" not in msg_source.lower():
+                                msg_source = f"<msgsource>{msg_source}</msgsource>"
+                            root = ET.fromstring(msg_source)
+                            # 尝试提取不同可能的发送者标签
+                            for tag in ["username", "nickname", "alias", "fromusername"]:
+                                elem = root.find(f"./{tag}")
+                                if elem is not None and elem.text:
+                                    cmsg.sender_wxid = elem.text
                                     sender_extracted = True
-                                    logger.debug(f"[WX849] 群聊发送者从XML({tag})提取: {cmsg.sender_wxid}")
+                                    logger.debug(f"[WX849] 群聊发送者从MsgSource提取(标签:{tag}): {cmsg.sender_wxid}")
                                     break
+                                    
+                            # 同时尝试提取机器人在群内的昵称
+                            for tag in ["selfDisplayName", "displayname", "nickname"]:
+                                elem = root.find(f"./{tag}")
+                                if elem is not None and elem.text:
+                                    cmsg.self_display_name = elem.text
+                                    logger.debug(f"[WX849] 从MsgSource中提取到机器人群内昵称: {cmsg.self_display_name}")
+                                    break
+                        except Exception as e:
+                            logger.debug(f"[WX849] 从MsgSource提取发送者失败: {e}")
                 except Exception as e:
-                    logger.error(f"[WX849] 从XML提取群聊发送者失败: {e}")
+                    logger.debug(f"[WX849] 尝试解析MsgSource时出错: {e}")
             
             # 方法4: 尝试从其它字段提取
             if not sender_extracted:
@@ -1370,15 +1364,6 @@ class WX849Channel(ChatChannel):
                 cmsg.content = split_content[1]
                 sender_extracted = True
                 logger.debug(f"[WX849] 群聊发送者提取(方法1): {cmsg.sender_wxid}")
-            
-            # 方法2: 尝试解析简单的格式 "wxid:消息内容"
-            if not sender_extracted:
-                split_content = cmsg.content.split(":", 1)
-                if len(split_content) > 1 and split_content[0] and not split_content[0].startswith("<"):
-                    cmsg.sender_wxid = split_content[0]
-                    cmsg.content = split_content[1]
-                    sender_extracted = True
-                    logger.debug(f"[WX849] 群聊发送者提取(方法2): {cmsg.sender_wxid}")
             
             # 方法3: 尝试从MsgSource XML中提取
             if not sender_extracted:
