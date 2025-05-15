@@ -170,20 +170,51 @@ class ChatChannel(Channel):
     def _handle(self, context: Context):
         if context is None or not context.content:
             return
-        logger.debug("[chat_channel] ready to handle context: {}".format(context))
+            
+        # 创建上下文的深拷贝，确保完全独立
+        # 由于Context对象没有copy方法，我们需要手动创建一个新的Context对象
+        independent_context = Context(
+            type=context.type,
+            content=context.content,
+            kwargs={}  # 创建空字典，然后手动复制
+        )
+
+        # 手动复制 kwargs 字典中的内容
+        for key in context.kwargs:
+            # 对于复杂对象，创建深拷贝
+            if isinstance(context.kwargs[key], dict):
+                independent_context.kwargs[key] = context.kwargs[key].copy()
+            elif isinstance(context.kwargs[key], list):
+                independent_context.kwargs[key] = context.kwargs[key].copy()
+            else:
+                independent_context.kwargs[key] = context.kwargs[key]
+
+        # 记录上下文信息，确保使用的是正确的上下文对象
+        logger.debug("[chat_channel] ready to handle context: {}".format(independent_context))
+
+        # 记录关键信息，用于调试
+        session_id = independent_context.get("session_id", "unknown")
+        receiver = independent_context.get("receiver", "unknown")
+        is_group = independent_context.get("isgroup", False)
+        logger.debug(f"[chat_channel] Processing message - session_id: {session_id}, receiver: {receiver}, isgroup: {is_group}")
+        
         # reply的构建步骤
-        reply = self._generate_reply(context)
+        reply = self._generate_reply(independent_context)
 
         logger.debug("[chat_channel] ready to decorate reply: {}".format(reply))
 
         # reply的包装步骤
         if reply and reply.content:
-            reply = self._decorate_reply(context, reply)
+            reply = self._decorate_reply(independent_context, reply)
 
             # reply的发送步骤
-            self._send_reply(context, reply)
+            self._send_reply(independent_context, reply)
 
     def _generate_reply(self, context: Context, reply: Reply = Reply()) -> Reply:
+        # 确保上下文中包含 isgroup 键
+        if "isgroup" not in context:
+            context["isgroup"] = False
+            
         e_context = PluginManager().emit_event(
             EventContext(
                 Event.ON_HANDLE_CONTEXT,
@@ -194,7 +225,19 @@ class ChatChannel(Channel):
         if not e_context.is_pass():
             logger.debug("[chat_channel] ready to handle context: type={}, content={}".format(context.type, context.content))
             if context.type == ContextType.TEXT or context.type == ContextType.IMAGE_CREATE:  # 文字和图片消息
+                # 备份原始通道和接收者信息
+                original_channel = context.get("original_channel")
+                original_receiver = context.get("original_receiver")
+                
+                # 更新当前通道
                 context["channel"] = e_context["channel"]
+                
+                # 确保不丢失原始通道和接收者信息
+                if original_channel and "original_channel" not in context:
+                    context["original_channel"] = original_channel
+                if original_receiver and "original_receiver" not in context:
+                    context["original_receiver"] = original_receiver
+                    
                 reply = super().build_reply_content(context.content, context)
             elif context.type == ContextType.VOICE:  # 语音消息
                 cmsg = context["msg"]
@@ -297,10 +340,21 @@ class ChatChannel(Channel):
 
     def _send(self, reply: Reply, context: Context, retry_cnt=0):
         try:
-            # 检查context是否包含原始通道，如果包含就用原始通道发送回复
-            if hasattr(context, 'channel') and context.channel:
+            # 1. 最优先使用context中保存的原始通道信息
+            if "original_channel" in context and context["original_channel"]:
+                original_channel = context["original_channel"]
+                logger.debug(f"[chat_channel] 使用保存的原始通道 {original_channel.__class__.__name__} 发送回复")
+                
+                # 确保使用原始接收者信息
+                if "original_receiver" in context:
+                    logger.debug(f"[chat_channel] 使用原始接收者: {context['original_receiver']}")
+                
+                original_channel.send(reply, context)
+                
+            # 2. 其次尝试使用context.channel
+            elif hasattr(context, 'channel') and context.channel:
                 # 使用接收消息时的原始通道发送回复
-                logger.debug(f"[chat_channel] 使用原始通道 {context.channel.__class__.__name__} 发送回复")
+                logger.debug(f"[chat_channel] 使用context.channel原始通道 {context.channel.__class__.__name__} 发送回复")
                 context.channel.send(reply, context)
             else:
                 # 如果没有原始通道，才使用当前通道
@@ -351,6 +405,18 @@ class ChatChannel(Channel):
         return func
 
     def produce(self, context: Context):
+        # 备份原始通道信息，确保后续处理过程中不会丢失
+        if hasattr(context, 'channel') and context.channel:
+            original_channel = context.channel
+            if "original_channel" not in context:
+                context["original_channel"] = original_channel
+            logger.debug(f"[chat_channel] 保存原始通道信息: {original_channel.__class__.__name__}")
+                
+        # 备份原始接收者信息，确保后续处理过程中不会丢失
+        if "receiver" in context and "original_receiver" not in context:
+            context["original_receiver"] = context["receiver"]
+            logger.debug(f"[chat_channel] 保存原始接收者信息: {context['original_receiver']}")
+            
         session_id = context.get("session_id", 0)
         with self.lock:
             if session_id not in self.sessions:
